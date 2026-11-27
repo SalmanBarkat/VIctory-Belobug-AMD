@@ -4158,6 +4158,20 @@ impl<'a> Lower<'a> {
         self.s.m.cast(self.cur, Cast::Bitcast, f, self.s.t.i32)
     }
 
+    /// Flushes 32-bit float denormals to zero, preserving the sign bit.
+    fn ftz_f32(&mut self, x: V) -> V {
+        let c = self.cur;
+        let bits = self.as_int(x);
+        let mag_mask = self.s.m.i32(0x7FFF_FFFF);
+        let sign_mask = self.s.m.i32(0x8000_0000);
+        let min_norm = self.s.m.i32(0x0080_0000);
+        let mag = self.s.m.bin(c, Bin::And, bits, mag_mask);
+        let is_sub = self.s.m.cmp(c, pred::IULT, mag, min_norm);
+        let zero = self.s.m.bin(c, Bin::And, bits, sign_mask);
+        let flushed = self.s.m.select(c, is_sub, zero, bits);
+        self.as_float(flushed)
+    }
+
     /// The SDWA operand selection of source `k`: a byte or word of the
     /// dword, zero- or sign-extended (none: the whole dword).
     fn sdwa_src(inst: &Inst, k: usize) -> Option<(u8, bool)> {
@@ -8642,8 +8656,10 @@ impl<'a> Lower<'a> {
             "v_cubeid_f32" | "v_cubesc_f32" | "v_cubetc_f32" | "v_cubema_f32" => {
                 // Cube-map face coordinates (AMD's ISA): the major axis is z
                 // when |z| >= |x| and |z| >= |y|, else y when |y| >= |x|,
-                // else x.
+                // else x. Flush denormal inputs to signed zero first so host
+                // software adapters agree with the console's FTZ mode.
                 let (x, y, z) = (f(self, 0)?, f(self, 1)?, f(self, 2)?);
+                let (x, y, z) = (self.ftz_f32(x), self.ftz_f32(y), self.ftz_f32(z));
                 let (ax, ay, az) = (self.unary(6, x), self.unary(6, y), self.unary(6, z));
                 let zx = self.s.m.cmp(c, pred::OGE, az, ax);
                 let zy = self.s.m.cmp(c, pred::OGE, az, ay);

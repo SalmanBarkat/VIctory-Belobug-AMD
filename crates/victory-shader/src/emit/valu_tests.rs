@@ -2244,3 +2244,61 @@ fn rdna_forms_give_what_the_spelled_out_ones_give() {
         }
     }
 }
+
+#[test]
+fn cube_denormal_coordinates_flush_to_zero() {
+    let pos_den = 0x0000_0001u32;
+    let neg_den = 0x8000_0001u32;
+    let one = 1.0f32.to_bits();
+    let neg_two = (-2.0f32).to_bits();
+    let pos_z_face = 4.0f32.to_bits();
+
+    let id_shader = build_valu_cs(&vop3(0x144, 0, vgpr(1), vgpr(2), vgpr(3)));
+    run_cases(
+        &id_shader,
+        &[
+            [neg_den, 0, 0, 0],
+            [0, neg_den, 0, 0],
+            [0, 0, neg_den, 0],
+            [one, neg_den, 0, 0],
+            [neg_two, pos_den, 0, 0],
+        ],
+        |backend, i, _, got| {
+            let want = match i {
+                0..=2 => pos_z_face,
+                3 => 0.0f32.to_bits(),
+                _ => 1.0f32.to_bits(),
+            };
+            assert_eq!(got, want, "{backend}: v_cubeid_f32 case {i} got {got:#010x}");
+        },
+    );
+
+    let sc_shader = build_valu_cs(&vop3(0x145, 0, vgpr(1), vgpr(2), vgpr(3)));
+    run_cases(
+        &sc_shader,
+        &[[neg_den, 0, 0, 0], [one, 0, neg_den, 0]],
+        |backend, i, _, got| {
+            let want = if i == 0 { 0x8000_0000 } else { 0 };
+            assert_eq!(got, want, "{backend}: v_cubesc_f32 case {i} got {got:#010x}");
+        },
+    );
+
+    let tc_shader = build_valu_cs(&vop3(0x146, 0, vgpr(1), vgpr(2), vgpr(3)));
+    run_cases(
+        &tc_shader,
+        &[[one, pos_den, 0, 0]],
+        |backend, _, _, got| {
+            assert_eq!(got, 0x8000_0000, "{backend}: v_cubetc_f32 got {got:#010x}");
+        },
+    );
+
+    let ma_shader = build_valu_cs(&vop3(0x147, 0, vgpr(1), vgpr(2), vgpr(3)));
+    run_cases(
+        &ma_shader,
+        &[[neg_den, 0, 0, 0], [pos_den, 0, neg_den, 0]],
+        |backend, i, _, got| {
+            let want = if i == 0 { 0 } else { 0x8000_0000 };
+            assert_eq!(got, want, "{backend}: v_cubema_f32 case {i} got {got:#010x}");
+        },
+    );
+}
