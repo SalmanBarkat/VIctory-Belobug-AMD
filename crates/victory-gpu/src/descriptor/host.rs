@@ -4102,14 +4102,6 @@ fn buffer_uav(
     Some(Some(shadow.buffer.clone()))
 }
 
-/// Whether the host can make a shader (or unordered access) view of
-/// `texture` in `format` (none: the texture's own). The console allows any
-/// view; the host refuses (and removes the device for) views without the
-/// resource's permission, of typed depth, and in another format than a
-/// typed resource's. A view of a typed texture in another format of its
-/// family takes the texture's format.
-/// shortcut: such a view (sRGB of UNORM, say) reads without its
-/// conversion; cast with castable formats if colors come out wrong.
 /// Whether typed unordered access views in `format` are supported by the host
 /// device (`D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW`).
 fn supports_typed_uav(format: u32) -> bool {
@@ -4149,6 +4141,14 @@ fn supports_typed_uav(format: u32) -> bool {
     ok
 }
 
+/// Whether the host can make a shader (or unordered access) view of
+/// `texture` in `format` (none: the texture's own). The console allows any
+/// view; the host refuses (and removes the device for) views without the
+/// resource's permission, of typed depth, and in another format than a
+/// typed resource's. A view of a typed texture in another format of its
+/// family takes the texture's format.
+/// shortcut: such a view (sRGB of UNORM, say) reads without its
+/// conversion; cast with castable formats if colors come out wrong.
 fn fits(texture: &ID3D12Resource, mut format: Option<&mut DXGI_FORMAT>, unordered: bool) -> bool {
     use crate::resource::{DEPTH_FORMATS, family};
     // SAFETY: a live resource.
