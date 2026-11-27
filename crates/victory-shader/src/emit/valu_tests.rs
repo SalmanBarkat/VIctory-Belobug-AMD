@@ -1689,6 +1689,8 @@ const DS_MAX_F32: u8 = 0x13;
 const DS_MIN_RTN_F32: u8 = 0x32;
 const DS_MAX_RTN_F32: u8 = 0x33;
 const DS_READ_B32: u8 = 0x36;
+const DS_WRITE_B64: u8 = 0x4D;
+const DS_READ_B64: u8 = 0x76;
 
 /// What RDNA2 writes for `ds_max_f32` / `ds_min_f32` over a dword holding
 /// `old` with `data` (bits), as measured on gfx1036 with f32 denormals kept:
@@ -2330,6 +2332,55 @@ fn lds_out_of_bounds_reads_zero_and_drops_writes() {
             assert_eq!(
                 got, want,
                 "{backend}: OOB ds_max_rtn_f32 clobbered LDS[0] at {:#x}",
+                inp[0]
+            );
+        },
+    );
+
+    // 4. Multi-dword read at `0xFFFF_FFFC` must not wrap its second dword to LDS[0].
+    let mut read64_body = vec![vop1(0x001, 5, 0x80)];
+    read64_body.extend(ds(DS_WRITE_B64, 0, 5, 2)); // LDS[0]=v2, LDS[1]=v3
+    read64_body.push(S_BARRIER);
+    read64_body.extend(ds(DS_READ_B64, 6, 1, 0)); // v[6:7] = ds_read_b64 v1
+    read64_body.push(vop1(0x001, 0, vgpr(7))); // check second dword
+    let read64_shader = build_cs(&read64_body, 64, 512);
+    run_cases(
+        &read64_shader,
+        &[
+            [0, 0x1234_5678, 0x9ABC_DEF0, 0],
+            [508, 0x1234_5678, 0x9ABC_DEF0, 0],
+            [0xFFFF_FFFC, 0x1234_5678, 0x9ABC_DEF0, 0],
+        ],
+        |backend, _, inp, got| {
+            let want = if inp[0] == 0 { inp[2] } else { 0 };
+            assert_eq!(
+                got, want,
+                "{backend}: OOB ds_read_b64 second dword at {:#x}",
+                inp[0]
+            );
+        },
+    );
+
+    // 5. Multi-dword write at `0xFFFF_FFFC` must not wrap its second dword to LDS[0].
+    let mut write64_body = vec![vop1(0x001, 5, 0x80)];
+    write64_body.extend(ds(DS_WRITE_B32, 0, 5, 2)); // LDS[0] = v2
+    write64_body.push(S_BARRIER);
+    write64_body.extend(ds(DS_WRITE_B64, 0, 1, 3)); // write v[3:4] at v1
+    write64_body.push(S_BARRIER);
+    write64_body.extend(ds(DS_READ_B32, 0, 5, 0));
+    let write64_shader = build_cs(&write64_body, 64, 512);
+    run_cases(
+        &write64_shader,
+        &[
+            [0, 0xCAFE_BABE, 0xDEAD_BEEF, 0xBAD0_CAFE],
+            [508, 0xCAFE_BABE, 0xDEAD_BEEF, 0xBAD0_CAFE],
+            [0xFFFF_FFFC, 0xCAFE_BABE, 0xDEAD_BEEF, 0xBAD0_CAFE],
+        ],
+        |backend, _, inp, got| {
+            let want = if inp[0] == 0 { inp[2] } else { inp[1] };
+            assert_eq!(
+                got, want,
+                "{backend}: OOB ds_write_b64 clobbered LDS[0] at {:#x}",
                 inp[0]
             );
         },

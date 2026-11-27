@@ -5592,10 +5592,12 @@ impl<'a> Lower<'a> {
             let c = l.cur;
             let o = l.s.m.i32(bytes);
             let at = l.s.m.bin(c, Bin::Add, a, o);
+            let no_wrap = l.s.m.cmp(c, pred::IUGE, at, o);
             let two = l.s.m.i32(2);
             let index = l.s.m.bin(c, Bin::LShr, at, two);
             let limit = l.s.m.i32(l.s.lds_dwords);
-            let inside = l.s.m.cmp(c, pred::IULT, index, limit);
+            let in_bounds = l.s.m.cmp(c, pred::IULT, index, limit);
+            let inside = l.s.m.bin(c, Bin::And, no_wrap, in_bounds);
             let zero = l.s.m.i32(0);
             let clamped = l.s.m.select(c, inside, index, zero);
             let lds = l.s.lds();
