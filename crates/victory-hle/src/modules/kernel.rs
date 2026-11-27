@@ -167,6 +167,7 @@ pub extern "system" fn GetProcAddress(module: *mut c_void, name: *const u8) -> *
             ordinal = name as usize,
             "GetProcAddress by ordinal"
         );
+        host::set_last_error(ERROR_PROC_NOT_FOUND);
         return std::ptr::null_mut();
     }
     // SAFETY: not an ordinal, so the title passes a NUL-terminated name.
@@ -175,6 +176,7 @@ pub extern "system" fn GetProcAddress(module: *mut c_void, name: *const u8) -> *
         Some(e) => e.address as *mut c_void,
         None => {
             tracing::warn!(module = m.name, %name, "GetProcAddress: not implemented");
+            host::set_last_error(ERROR_PROC_NOT_FOUND);
             std::ptr::null_mut()
         }
     }
@@ -354,6 +356,7 @@ fn refuse(file: &str) {
 }
 
 const ERROR_MOD_NOT_FOUND: u32 = 126;
+const ERROR_PROC_NOT_FOUND: u32 = 127;
 
 /// The title's argument list: the program, then what was given after `--`.
 /// The host's own would be ours (`victory run <exe> ...`), and the title
@@ -827,5 +830,49 @@ mod tests {
             let last = unsafe { windows_sys::Win32::Foundation::GetLastError() };
             assert_eq!(last, ERROR_INSUFFICIENT_BUFFER);
         }
+    }
+
+    /// A failed `GetProcAddress` lookup behind a pseudo module reports
+    /// `ERROR_PROC_NOT_FOUND`; a hit leaves the thread's last error alone.
+    #[test]
+    fn pseudo_module_get_proc_address_sets_error_proc_not_found_on_miss() {
+        let runtime = LoadLibraryA(c"xgameruntime.dll".as_ptr().cast());
+        assert!(!runtime.is_null());
+
+        host::set_last_error(0);
+        assert!(GetProcAddress(runtime, c"NoSuchExport".as_ptr().cast()).is_null());
+        #[cfg(windows)]
+        assert_eq!(
+            // SAFETY: reads this thread's last error.
+            unsafe { windows_sys::Win32::Foundation::GetLastError() },
+            ERROR_PROC_NOT_FOUND
+        );
+
+        host::set_last_error(0);
+        assert!(GetProcAddress(runtime, std::ptr::dangling::<u8>()).is_null());
+        #[cfg(windows)]
+        assert_eq!(
+            // SAFETY: reads this thread's last error.
+            unsafe { windows_sys::Win32::Foundation::GetLastError() },
+            ERROR_PROC_NOT_FOUND
+        );
+
+        let present = registry()
+            .iter()
+            .find(|m| handle(m) == runtime)
+            .and_then(|m| m.exports.first())
+            .expect("xgameruntime pseudo module must expose at least one export");
+        let export_name = std::ffi::CString::new(present.name).unwrap();
+        host::set_last_error(ERROR_INSUFFICIENT_BUFFER);
+        assert_eq!(
+            GetProcAddress(runtime, export_name.as_ptr().cast()) as usize,
+            present.address
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            // SAFETY: reads this thread's last error.
+            unsafe { windows_sys::Win32::Foundation::GetLastError() },
+            ERROR_INSUFFICIENT_BUFFER
+        );
     }
 }
