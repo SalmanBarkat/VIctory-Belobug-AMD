@@ -426,16 +426,16 @@ pub(crate) struct State {
     /// Tables made afresh in this list: (table, slot count, contents) → first
     /// dynamic slot.
     fresh_tables: std::collections::HashMap<(u64, u32, u64), FreshTable, std::hash::BuildHasherDefault<crate::host::AddressHash>>,
-    /// The dynamic slots the list holds: title heap, first, count; given
+    /// The dynamic slots the list holds: title heap id, first, count; given
     /// back when the list has run, is reset or released.
-    dynamic: Vec<(usize, u32, u32)>,
-    /// Root SRVs bound as one-view tables in this list: (title heap, title
+    dynamic: Vec<(u64, u32, u32)>,
+    /// Root SRVs bound as one-view tables in this list: (title heap id, title
     /// address; 0 for none) → dynamic slot, and the host copy the slot
     /// shows: later draws of the list bring that one up to date, whatever
     /// copy the address would find by then (`shadow.rs` `tails`).
-    root_srv_slots: std::collections::HashMap<(usize, u64), RootSlot>,
+    root_srv_slots: std::collections::HashMap<(u64, u64), RootSlot>,
     /// Root UAVs bound as one-view tables in this list, likewise.
-    root_uav_slots: std::collections::HashMap<(usize, u64), RootSlot>,
+    root_uav_slots: std::collections::HashMap<(u64, u64), RootSlot>,
     /// The list ran and its dynamic slots were given back.
     tables_gone: bool,
     /// This recording, for [`crate::descriptor::host::HostHeap::make_listed`]
@@ -1890,7 +1890,7 @@ impl State {
             once!("a root UAV without a bound view heap: the draw is dropped");
             return false;
         };
-        let key = (std::ptr::from_ref(heap) as usize, address.unwrap_or(0));
+        let key = (heap.id, address.unwrap_or(0));
         let (index, shadow) = match self.root_uav_slots.get(&key) {
             Some((index, shadow)) => (*index, address.zip(shadow.clone())),
             None => {
@@ -1959,7 +1959,7 @@ impl State {
         // A view that begins early is another view than one that does not
         // (title addresses stay below bit 63).
         let key = (
-            std::ptr::from_ref(heap) as usize,
+            heap.id,
             address.unwrap_or(0) | u64::from(biased) << 63,
         );
         let (index, shadow) = match self.root_srv_slots.get(&key) {
@@ -2064,9 +2064,9 @@ impl State {
         let started = std::time::Instant::now();
         let mut stage = crate::timeline::span("the heap pass: begun, or done here");
         if crate::host::aside::on() {
-            let at = std::ptr::from_ref(heap) as usize;
+            let heap_id = heap.id;
             list.refreshes_coming(move || {
-                crate::descriptor::with_heap(at, |heap| {
+                crate::descriptor::with_heap(heap_id, |heap| {
                     // The list retains the original stride buffer. A newly
                     // allocated heap at the same CPU address has another one.
                     heap.host()
@@ -3551,8 +3551,7 @@ impl State {
                 continue;
             };
             self.fresh_tables.insert(key, FreshTable { first, epoch: 0, ready: Vec::new() });
-            self.dynamic
-                .push((std::ptr::from_ref(heap) as usize, first, n));
+            self.dynamic.push((heap.id, first, n));
             // The title's own slots of this table: what the draw reads of
             // them it brings up to date here, in the dynamic slots.
             let title_first = heap.index(table).filter(|first| first + n <= host.count());
@@ -3637,7 +3636,7 @@ impl State {
                             host.make_null(index);
                             continue;
                         };
-                        let slot = (std::ptr::from_ref(heap) as usize, index);
+                        let slot = (heap.id, index);
                         list.defer_constants(to, address as *const u8, size as usize, slot);
                         host.constant_at(index, &buffer, gpu, size);
                     }

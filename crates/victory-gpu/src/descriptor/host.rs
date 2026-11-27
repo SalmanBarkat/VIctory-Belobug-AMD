@@ -1857,6 +1857,16 @@ fn null_sampler(at: D3D12_CPU_DESCRIPTOR_HANDLE) {
 }
 
 impl HostHeap {
+    #[cfg(test)]
+    pub(super) fn dynamic_count(&self) -> u32 {
+        self.dynamic
+    }
+
+    #[cfg(test)]
+    pub(super) fn free_dynamic(&self) -> u32 {
+        self.free.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// `n` consecutive free dynamic slots (view heaps only), taken until
     /// [`HostHeap::release`]: the first's index.
     pub(crate) fn dynamic(&self, n: u32) -> Option<u32> {

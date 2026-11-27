@@ -119,7 +119,7 @@ const MOST: usize = 12288;
 pub(super) enum FillTo {
     /// A descriptor slot that shows the fill's memory, and nothing else does
     /// (title heap, slot): it is made to show our buffer instead.
-    Slot(usize, u32),
+    Slot(u64, u32),
     /// A buffer the card can write, filled from its beginning.
     Buffer(ID3D12Resource),
 }
@@ -526,7 +526,7 @@ enum To {
     /// A host copy, and the title address.
     Copy(Arc<Shadow>, usize),
     /// A descriptor slot (title heap, slot).
-    Slot(usize, u32),
+    Slot(u64, u32),
     /// A buffer's beginning.
     Buffer(ID3D12Resource),
 }

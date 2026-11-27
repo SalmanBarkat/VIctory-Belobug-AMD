@@ -51,6 +51,10 @@ pub(crate) struct Heap {
     desc: HeapDesc,
     /// The first descriptor: in `memory`, or in the title's own memory.
     pub(crate) start: u64,
+    /// Unique identifier for this heap instance so deferred dynamic slot
+    /// releases and card-step updates cannot touch a newer heap allocated at
+    /// the same pointer address.
+    pub(crate) id: u64,
     memory: Option<Memory>,
     /// Shader-visible view and sampler heaps get a host heap with the same
     /// descriptor order when a draw first uses them (decision 0007, step
@@ -123,13 +127,21 @@ const VIEWS_KIND: u32 = 0;
 const SAMPLERS: u32 = 1;
 const SHADER_VISIBLE: u32 = 1;
 
-/// Shader-visible heaps by address range, for mirroring descriptor writes:
-/// start, end, heap.
-#[cfg(windows)]
+/// Shader-visible heaps by address range, for mirroring descriptor writes.
 ///
 /// Held shared while a heap found here is used (by every thread that writes
 /// descriptors, and by [`sync_heaps`]), alone only where heaps come and go.
-static SHADER_HEAPS: std::sync::RwLock<Vec<(u64, u64, usize)>> = std::sync::RwLock::new(Vec::new());
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+struct ShaderHeap {
+    start: u64,
+    end: u64,
+    ptr: usize,
+    id: u64,
+}
+
+#[cfg(windows)]
+static SHADER_HEAPS: std::sync::RwLock<Vec<ShaderHeap>> = std::sync::RwLock::new(Vec::new());
 
 /// Makes the host descriptor for what the title wrote at `handle`, if it
 /// is in a shader-visible heap. Keeps `SHADER_HEAPS` locked for the duration
@@ -137,12 +149,13 @@ static SHADER_HEAPS: std::sync::RwLock<Vec<(u64, u64, usize)>> = std::sync::RwLo
 #[cfg(windows)]
 fn mirror(handle: u64) {
     let heaps = SHADER_HEAPS.read().unwrap_or_else(|e| e.into_inner());
-    let Some(&(_, _, at)) = heaps
+    let Some(entry) = heaps
         .iter()
-        .find(|&&(start, end, _)| (start..end).contains(&handle))
+        .find(|h| (h.start..h.end).contains(&handle))
     else {
         return;
     };
+    let at = entry.ptr;
     // SAFETY: registered heaps stay alive until `Heap::drop`, which takes
     // the `SHADER_HEAPS` lock we hold here.
     let heap = unsafe { &*(at as *const Heap) };
@@ -340,7 +353,7 @@ pub(crate) fn round_mark() -> u64 {
 #[cfg(windows)]
 pub(crate) fn in_shader_heap(at: usize, len: usize) -> bool {
     let (from, to) = (at as u64, at as u64 + len as u64);
-    SHADER_HEAPS.read().unwrap_or_else(|e| e.into_inner()).iter().any(|&(start, end, _)| from < end && start < to)
+    SHADER_HEAPS.read().unwrap_or_else(|e| e.into_inner()).iter().any(|h| from < h.end && h.start < to)
 }
 
 #[cfg(windows)]
@@ -385,7 +398,8 @@ pub(crate) fn sync_heaps() {
     let mut wait: Vec<u32> = Vec::new();
     let frame = crate::frame::current();
     let heaps = SHADER_HEAPS.read().unwrap_or_else(|e| e.into_inner());
-    for &(start, end, at) in heaps.iter() {
+    for entry in heaps.iter() {
+        let (start, end, at) = (entry.start, entry.end, entry.ptr);
         // SAFETY: registered heaps are live (removed when dropped).
         let heap = unsafe { &*(at as *const Heap) };
         let (Some(Some(host)), Some(written), Some(step)) =
@@ -837,29 +851,29 @@ pub(crate) fn lent_heap() -> Option<usize> {
     heaps
         .iter()
         // SAFETY: registered heaps are live (removed when dropped).
-        .map(|&(_, _, h)| (h, unsafe { &*(h as *const Heap) }))
+        .map(|h| (h.ptr, unsafe { &*(h.ptr as *const Heap) }))
         .filter(|(_, heap)| !heap.samplers() && matches!(heap.host.get(), Some(Some(_))))
         .max_by_key(|(_, heap)| heap.desc.count)
         .map(|(h, _)| h)
 }
 
-/// `f` of the title heap at `heap`, if that heap still exists; it stays
-/// until `f` is done.
+/// `f` of the title heap with unique id `id`, if that heap still exists; it
+/// stays until `f` is done.
 #[cfg(windows)]
-pub(crate) fn with_heap<T>(heap: usize, f: impl FnOnce(&Heap) -> T) -> Option<T> {
+pub(crate) fn with_heap<T>(id: u64, f: impl FnOnce(&Heap) -> T) -> Option<T> {
     let heaps = SHADER_HEAPS.read().unwrap_or_else(|e| e.into_inner());
     // SAFETY: registered heaps are live (removed when dropped).
-    heaps.iter().any(|&(_, _, h)| h == heap).then(|| f(unsafe { &*(heap as *const Heap) }))
+    heaps.iter().find(|h| h.id == id).map(|h| f(unsafe { &*(h.ptr as *const Heap) }))
 }
 
-/// Gives back dynamic slots of the host heap behind the title heap at
-/// `heap`, if that heap still exists.
+/// Gives back dynamic slots of the host heap behind the title heap with
+/// unique id `id`, if that heap still exists.
 #[cfg(windows)]
-pub(crate) fn release_dynamic(heap: usize, first: u32, n: u32) {
+pub(crate) fn release_dynamic(id: u64, first: u32, n: u32) {
     let heaps = SHADER_HEAPS.read().unwrap_or_else(|e| e.into_inner());
-    if heaps.iter().any(|&(_, _, h)| h == heap)
+    if let Some(entry) = heaps.iter().find(|h| h.id == id)
         // SAFETY: registered heaps are live (removed when dropped).
-        && let Some(Some(host)) = unsafe { &*(heap as *const Heap) }.host.get()
+        && let Some(Some(host)) = unsafe { &*(entry.ptr as *const Heap) }.host.get()
     {
         host.release(first, n);
     }
@@ -873,28 +887,28 @@ pub(crate) fn with_view_heap<T>(f: impl FnOnce(&host::HostHeap) -> T) -> Option<
     let host = heaps
         .iter()
         // SAFETY: registered heaps are live (removed when dropped).
-        .map(|&(_, _, at)| unsafe { &*(at as *const Heap) })
+        .map(|h| unsafe { &*(h.ptr as *const Heap) })
         .filter(|heap| !heap.samplers())
         .filter_map(|heap| heap.host.get()?.as_ref())
         .max_by_key(|host| host.count())?;
     Some(f(host))
 }
 
-/// Makes dynamic slot `index` of the host heap behind the title heap at
-/// `heap`, if that heap still exists, the constant buffer view of `size`
-/// bytes of `buffer` at `gpu`.
+/// Makes dynamic slot `index` of the host heap behind the title heap with
+/// unique id `id`, if that heap still exists, the constant buffer view of
+/// `size` bytes of `buffer` at `gpu`.
 #[cfg(windows)]
 pub(crate) fn constant_slot(
-    heap: usize,
+    id: u64,
     index: u32,
     buffer: &windows::Win32::Graphics::Direct3D12::ID3D12Resource,
     gpu: u64,
     size: u32,
 ) {
     let heaps = SHADER_HEAPS.read().unwrap_or_else(|e| e.into_inner());
-    if heaps.iter().any(|&(_, _, h)| h == heap)
+    if let Some(entry) = heaps.iter().find(|h| h.id == id)
         // SAFETY: registered heaps are live (removed when dropped).
-        && let Some(Some(host)) = unsafe { &*(heap as *const Heap) }.host.get()
+        && let Some(Some(host)) = unsafe { &*(entry.ptr as *const Heap) }.host.get()
     {
         host.constant_at(index, buffer, gpu, size);
     }
@@ -903,9 +917,8 @@ pub(crate) fn constant_slot(
 #[cfg(windows)]
 impl Drop for Heap {
     fn drop(&mut self) {
-        let at = std::ptr::from_ref::<Heap>(self) as usize;
         let mut heaps = SHADER_HEAPS.write().unwrap_or_else(|e| e.into_inner());
-        heaps.retain(|&(_, _, h)| h != at);
+        heaps.retain(|h| h.id != self.id);
         crate::port_descriptors::let_go(self.start);
     }
 }
@@ -1433,11 +1446,11 @@ pub(crate) fn make_waiting() {
             // there.)
             // (The heap stays while the lock is held: `mirror`.)
             let heaps = SHADER_HEAPS.read().unwrap_or_else(|e| e.into_inner());
-            let Some(&(_, _, at)) = heaps.iter().find(|&&(start, end, _)| (start..end).contains(&handle)) else {
+            let Some(entry) = heaps.iter().find(|h| (h.start..h.end).contains(&handle)) else {
                 continue;
             };
             // SAFETY: a registered heap, live while the lock is held.
-            let heap = unsafe { &*(at as *const Heap) };
+            let heap = unsafe { &*(entry.ptr as *const Heap) };
             let Some(index) = heap.index(handle) else {
                 continue;
             };
@@ -1732,11 +1745,13 @@ pub(crate) extern "system" fn create_heap(
             Err(hr) => return hr,
         }
     };
+    static NEXT_HEAP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let visible = desc.flags & SHADER_VISIBLE != 0 && matches!(desc.kind, VIEWS_KIND | SAMPLERS);
     let heap = Box::new(Heap {
         object: Object::new(&FUNCTIONS),
         desc,
         start,
+        id: NEXT_HEAP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         memory,
         #[cfg(windows)]
         host: std::sync::OnceLock::new(),
@@ -1756,7 +1771,12 @@ pub(crate) extern "system" fn create_heap(
     if visible {
         let at = std::ptr::from_ref::<Heap>(&heap) as usize;
         let mut heaps = SHADER_HEAPS.write().unwrap_or_else(|e| e.into_inner());
-        heaps.push((start, start + size, at));
+        heaps.push(ShaderHeap {
+            start,
+            end: start + size,
+            ptr: at,
+            id: heap.id,
+        });
     }
     #[cfg(not(windows))]
     let _ = visible;
@@ -2071,5 +2091,57 @@ mod tests {
         // A size that does not match the count is not a placement.
         assert_eq!(create(desc, Placement { address, size: 7 }, &mut h), S_OK);
         assert_ne!(slot::<extern "system" fn(This) -> u64>(h, 0x48)(h), address);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stale_heap_id_cannot_release_or_touch_newer_heap_at_same_pointer() {
+        let desc = HeapDesc {
+            kind: VIEWS_KIND,
+            count: 64,
+            flags: SHADER_VISIBLE,
+            nodes: 0,
+        };
+        let none = Placement { address: 0, size: 0 };
+        let mut raw_a = std::ptr::null();
+        assert_eq!(create(desc, none, &mut raw_a), S_OK);
+        let id_a = heap(raw_a).id;
+        let Some(host_a) = heap(raw_a).host() else {
+            assert_eq!(release(raw_a), 0);
+            return; // no host GPU
+        };
+        let slot_a = host_a.dynamic(1).unwrap();
+        assert_eq!(release(raw_a), 0);
+
+        let mut raw_b = std::ptr::null();
+        assert_eq!(create(desc, none, &mut raw_b), S_OK);
+        let id_b = heap(raw_b).id;
+        assert_ne!(id_a, id_b);
+        let ptr_b = raw_b as usize;
+        {
+            let heaps = SHADER_HEAPS.read().unwrap_or_else(|e| e.into_inner());
+            let entry = heaps.iter().find(|h| h.id == id_b).unwrap();
+            assert_eq!(entry.ptr, ptr_b);
+        }
+
+        let host_b = heap(raw_b).host().unwrap();
+        let count = host_b.dynamic_count();
+        let all = host_b.dynamic(count).unwrap();
+        assert_eq!(host_b.free_dynamic(), 0);
+        assert_eq!(host_b.dynamic(1), None);
+
+        // Stale heap id must neither release `raw_b`'s dynamic slots nor resolve `with_heap`.
+        release_dynamic(id_a, all, 1);
+        assert_eq!(host_b.free_dynamic(), 0);
+        assert_eq!(host_b.dynamic(1), None);
+        assert!(with_heap(id_a, |h| h.id).is_none());
+        assert_eq!(with_heap(id_b, |h| h.id), Some(id_b));
+
+        // The live heap id releases the slot normally.
+        release_dynamic(id_b, all, 1);
+        assert_eq!(host_b.free_dynamic(), 1);
+        assert_eq!(host_b.dynamic(1), Some(all));
+        let _ = slot_a;
+        assert_eq!(release(raw_b), 0);
     }
 }
